@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\AdminController;
+use App\Http\Controllers\ClientAuthController;
 use App\Http\Controllers\VisitRequestController;
 use App\Models\Property;
 use Illuminate\Support\Facades\Route;
@@ -45,12 +46,57 @@ Route::post('/biens/{property}/visite', [
     'store',
 ])->middleware('throttle:5,1')->name('visits.store');
 
-Route::get('/admin/login', [AdminController::class, 'loginForm'])
-    ->name('login');
+/*
+|--------------------------------------------------------------------------
+| Espace client
+|--------------------------------------------------------------------------
+*/
 
-Route::post('/admin/login', [AdminController::class, 'login'])
-    ->middleware('throttle:5,1')
-    ->name('admin.login');
+Route::get('/inscription', [
+    ClientAuthController::class,
+    'registerForm',
+])->name('client.register');
+
+Route::post('/inscription', [
+    ClientAuthController::class,
+    'register',
+])->middleware('throttle:5,1')->name('client.register.store');
+
+Route::get('/connexion', [
+    ClientAuthController::class,
+    'loginForm',
+])->name('client.login');
+
+Route::post('/connexion', [
+    ClientAuthController::class,
+    'login',
+])->middleware('throttle:5,1')->name('client.login.store');
+
+Route::get('/mon-compte', [
+    ClientAuthController::class,
+    'account',
+])->name('client.account');
+
+Route::post('/deconnexion', [
+    ClientAuthController::class,
+    'logout',
+])->middleware('auth')->name('client.logout');
+
+/*
+|--------------------------------------------------------------------------
+| Espace administrateur
+|--------------------------------------------------------------------------
+*/
+
+Route::get('/admin/login', [
+    AdminController::class,
+    'loginForm',
+])->name('login');
+
+Route::post('/admin/login', [
+    AdminController::class,
+    'login',
+])->middleware('throttle:5,1')->name('admin.login');
 
 Route::middleware('auth')->prefix('admin')->name('admin.')->group(function () {
     Route::get('/', [AdminController::class, 'dashboard'])
