@@ -2,9 +2,16 @@
 
 use App\Http\Controllers\AdminController;
 use App\Http\Controllers\ClientAuthController;
+use App\Http\Controllers\FavoriteController;
 use App\Http\Controllers\VisitRequestController;
 use App\Models\Property;
 use Illuminate\Support\Facades\Route;
+
+/*
+|--------------------------------------------------------------------------
+| Site public
+|--------------------------------------------------------------------------
+*/
 
 Route::get('/', function () {
     return view('welcome');
@@ -48,7 +55,7 @@ Route::post('/biens/{property}/visite', [
 
 /*
 |--------------------------------------------------------------------------
-| Espace client
+| Comptes clients
 |--------------------------------------------------------------------------
 */
 
@@ -84,7 +91,30 @@ Route::post('/deconnexion', [
 
 /*
 |--------------------------------------------------------------------------
-| Espace administrateur
+| Favoris
+|--------------------------------------------------------------------------
+*/
+
+Route::get('/client-state', [
+    FavoriteController::class,
+    'state',
+])->name('favorites.state');
+
+Route::middleware(['auth', 'throttle:60,1'])->group(function () {
+    Route::put('/favoris/{property}', [
+        FavoriteController::class,
+        'store',
+    ])->name('favorites.store');
+
+    Route::delete('/favoris/{property}', [
+        FavoriteController::class,
+        'destroy',
+    ])->name('favorites.destroy');
+});
+
+/*
+|--------------------------------------------------------------------------
+| Administration
 |--------------------------------------------------------------------------
 */
 
@@ -98,31 +128,50 @@ Route::post('/admin/login', [
     'login',
 ])->middleware('throttle:5,1')->name('admin.login');
 
-Route::middleware('auth')->prefix('admin')->name('admin.')->group(function () {
-    Route::get('/', [AdminController::class, 'dashboard'])
-        ->name('dashboard');
+Route::middleware('auth')
+    ->prefix('admin')
+    ->name('admin.')
+    ->group(function () {
+        Route::get('/', [AdminController::class, 'dashboard'])
+            ->name('dashboard');
 
-    Route::get('/properties/create', [AdminController::class, 'create'])
-        ->name('properties.create');
+        Route::get('/properties/create', [
+            AdminController::class,
+            'create',
+        ])->name('properties.create');
 
-    Route::post('/properties', [AdminController::class, 'store'])
-        ->name('properties.store');
+        Route::post('/properties', [
+            AdminController::class,
+            'store',
+        ])->name('properties.store');
 
-    Route::get('/properties/{property}/edit', [AdminController::class, 'edit'])
-        ->name('properties.edit');
+        Route::get('/properties/{property}/edit', [
+            AdminController::class,
+            'edit',
+        ])->name('properties.edit');
 
-    Route::put('/properties/{property}', [AdminController::class, 'update'])
-        ->name('properties.update');
+        Route::put('/properties/{property}', [
+            AdminController::class,
+            'update',
+        ])->name('properties.update');
 
-    Route::delete('/properties/{property}', [AdminController::class, 'destroy'])
-        ->name('properties.destroy');
+        Route::delete('/properties/{property}', [
+            AdminController::class,
+            'destroy',
+        ])->name('properties.destroy');
 
-    Route::get('/visites', [VisitRequestController::class, 'index'])
-        ->name('visits.index');
+        Route::get('/visites', [
+            VisitRequestController::class,
+            'index',
+        ])->name('visits.index');
 
-    Route::patch('/visites/{visit}', [VisitRequestController::class, 'update'])
-        ->name('visits.update');
+        Route::patch('/visites/{visit}', [
+            VisitRequestController::class,
+            'update',
+        ])->name('visits.update');
 
-    Route::post('/logout', [AdminController::class, 'logout'])
-        ->name('logout');
-});
+        Route::post('/logout', [
+            AdminController::class,
+            'logout',
+        ])->name('logout');
+    });
