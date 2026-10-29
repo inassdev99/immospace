@@ -1,19 +1,26 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 
 const money = (value) =>
     new Intl.NumberFormat('fr-MA').format(Number(value));
 
 function PropertyImage({ src, alt, ...props }) {
+    const [failed, setFailed] = useState(false);
+
+    useEffect(() => {
+        setFailed(false);
+    }, [src]);
+
     return (
         <img
             {...props}
-            src={src || '/images/villa-marrakech.jpg'}
+            src={
+                failed || !src
+                    ? '/images/villa-marrakech.jpg'
+                    : src
+            }
             alt={alt}
-            onError={(event) => {
-                event.currentTarget.onerror = null;
-                event.currentTarget.src = '/images/villa-marrakech.jpg';
-            }}
+            onError={() => setFailed(true)}
         />
     );
 }
@@ -31,6 +38,13 @@ function App() {
 
     const [favorites, setFavorites] = useState([]);
     const [favoritesOnly, setFavoritesOnly] = useState(false);
+    const [authenticated, setAuthenticated] = useState(false);
+    const [accountLoading, setAccountLoading] = useState(true);
+    const [accountError, setAccountError] = useState('');
+    const [favoriteError, setFavoriteError] = useState('');
+    const [favoriteBusy, setFavoriteBusy] = useState(false);
+
+    const favoriteLock = useRef(false);
 
     useEffect(() => {
         const controller = new AbortController();
@@ -38,9 +52,8 @@ function App() {
         async function loadProperties() {
             try {
                 const response = await fetch('/properties-data', {
-                    headers: {
-                        Accept: 'application/json',
-                    },
+                    headers: { Accept: 'application/json' },
+                    cache: 'no-store',
                     signal: controller.signal,
                 });
 
@@ -54,11 +67,16 @@ function App() {
                     throw new Error('Réponse invalide.');
                 }
 
-                setProperties(data);
+                setProperties(
+                    data.map((property) => ({
+                        ...property,
+                        id: Number(property.id),
+                    }))
+                );
             } catch (error) {
                 if (error.name !== 'AbortError') {
                     setLoadError(
-                        'Impossible de charger les biens. Vérifiez que Laravel et MySQL sont démarrés, puis actualisez la page.'
+                        'Impossible de charger les biens. Actualisez la page.'
                     );
                 }
             } finally {
@@ -68,37 +86,132 @@ function App() {
             }
         }
 
+        async function loadAccount() {
+            try {
+                const response = await fetch('/client-state', {
+                    headers: { Accept: 'application/json' },
+                    credentials: 'same-origin',
+                    cache: 'no-store',
+                    signal: controller.signal,
+                });
+
+                if (!response.ok) {
+                    throw new Error('Compte indisponible.');
+                }
+
+                const data = await response.json();
+
+                if (
+                    typeof data.authenticated !== 'boolean' ||
+                    !Array.isArray(data.favorites)
+                ) {
+                    throw new Error('Réponse invalide.');
+                }
+
+                setAuthenticated(data.authenticated);
+                setFavorites(data.favorites.map(Number));
+            } catch (error) {
+                if (error.name !== 'AbortError') {
+                    setAccountError(
+                        'Impossible de charger votre compte et vos favoris. Actualisez la page.'
+                    );
+                }
+            } finally {
+                if (!controller.signal.aborted) {
+                    setAccountLoading(false);
+                }
+            }
+        }
+
         loadProperties();
+        loadAccount();
 
         return () => controller.abort();
     }, []);
 
-    const cities = [...new Set(properties.map((item) => item.city))]
-        .filter(Boolean)
-        .sort();
+    async function toggleFavorite(id) {
+        if (accountLoading || accountError || favoriteLock.current) {
+            return;
+        }
 
-    const types = [...new Set(properties.map((item) => item.type))]
-        .filter(Boolean)
-        .sort();
+        if (!authenticated) {
+            window.location.assign('/connexion');
+            return;
+        }
 
-    function toggleFavorite(id) {
-        setFavorites((previous) =>
-            previous.includes(id)
-                ? previous.filter((item) => item !== id)
-                : [...previous, id]
-        );
+        const token = document.querySelector(
+            'meta[name="csrf-token"]'
+        )?.content;
+
+        if (!token) {
+            setFavoriteError(
+                'Session indisponible. Actualisez la page.'
+            );
+            return;
+        }
+
+        const alreadySaved = favorites.includes(id);
+
+        favoriteLock.current = true;
+        setFavoriteBusy(true);
+        setFavoriteError('');
+
+        try {
+            const response = await fetch('/favoris/' + id, {
+                method: alreadySaved ? 'DELETE' : 'PUT',
+                headers: {
+                    Accept: 'application/json',
+                    'X-CSRF-TOKEN': token,
+                },
+                credentials: 'same-origin',
+            });
+
+            if (response.status === 401) {
+                window.location.assign('/connexion');
+                return;
+            }
+
+            if (response.status === 419) {
+                throw new Error(
+                    'Votre session a expiré. Actualisez la page.'
+                );
+            }
+
+            if (response.status === 429) {
+                throw new Error(
+                    'Trop de demandes. Patientez une minute avant de réessayer.'
+                );
+            }
+
+            if (!response.ok) {
+                throw new Error(
+                    'Impossible de modifier ce favori. Réessayez.'
+                );
+            }
+
+            const data = await response.json();
+
+            if (typeof data.saved !== 'boolean') {
+                throw new Error('Réponse du serveur invalide.');
+            }
+
+            setFavorites((previous) =>
+                data.saved
+                    ? [...new Set([...previous, id])]
+                    : previous.filter((item) => item !== id)
+            );
+        } catch (error) {
+            setFavoriteError(error.message);
+        } finally {
+            favoriteLock.current = false;
+            setFavoriteBusy(false);
+        }
     }
 
     function search(event) {
         event.preventDefault();
 
-        setFilters({
-            transaction,
-            city,
-            type,
-            budget,
-        });
-
+        setFilters({ transaction, city, type, budget });
         setFavoritesOnly(false);
 
         document.getElementById('biens')?.scrollIntoView({
@@ -114,6 +227,27 @@ function App() {
         setFilters(null);
         setFavoritesOnly(false);
     }
+
+    function showFavorites() {
+        if (accountLoading || accountError) {
+            return;
+        }
+
+        if (!authenticated) {
+            window.location.assign('/connexion');
+            return;
+        }
+
+        setFavoritesOnly(!favoritesOnly);
+    }
+
+    const cities = [...new Set(properties.map((item) => item.city))]
+        .filter(Boolean)
+        .sort();
+
+    const types = [...new Set(properties.map((item) => item.type))]
+        .filter(Boolean)
+        .sort();
 
     const visibleProperties = properties.filter((property) => {
         if (favoritesOnly && !favorites.includes(property.id)) {
@@ -133,502 +267,244 @@ function App() {
         );
     });
 
+    const availableFavoritesCount = properties.filter(
+        (property) => favorites.includes(property.id)
+    ).length;
+
+    const favoritesDisabled =
+        accountLoading || Boolean(accountError) || favoriteBusy;
+
     return (
         <>
             <style>{`
-                * {
-                    box-sizing: border-box;
-                }
-
-                html {
-                    scroll-behavior: smooth;
-                }
-
+                * { box-sizing: border-box; }
+                html { scroll-behavior: smooth; }
                 body {
-                    margin: 0;
-                    font-family: Arial, sans-serif;
-                    background: #faf9f6;
-                    color: #203a33;
+                    margin: 0; font-family: Arial, sans-serif;
+                    background: #faf9f6; color: #203a33;
                 }
-
-                button, input, select {
-                    font: inherit;
+                button, input, select { font: inherit; }
+                button { cursor: pointer; }
+                button:disabled { opacity: .55; cursor: not-allowed; }
+                a { text-decoration: none; color: inherit; }
+                button:focus-visible, a:focus-visible,
+                input:focus-visible, select:focus-visible {
+                    outline: 3px solid #c29861; outline-offset: 4px;
                 }
-
-                button {
-                    cursor: pointer;
-                }
-
-                button:disabled {
-                    opacity: .6;
-                    cursor: wait;
-                }
-
-                a {
-                    text-decoration: none;
-                    color: inherit;
-                }
-
-                button:focus-visible,
-                a:focus-visible,
-                input:focus-visible,
-                select:focus-visible {
-                    outline: 3px solid #c29861;
-                    outline-offset: 4px;
-                }
-
                 .container {
-                    max-width: 1180px;
-                    margin: auto;
-                    padding: 0 28px;
+                    max-width: 1180px; margin: auto; padding: 0 28px;
                 }
-
                 .header {
-                    min-height: 88px;
-                    display: flex;
-                    align-items: center;
-                    justify-content: space-between;
-                    gap: 24px;
+                    min-height: 88px; display: flex; align-items: center;
+                    justify-content: space-between; gap: 24px;
                 }
-
                 .logo {
-                    font-size: 25px;
-                    font-weight: 800;
-                    letter-spacing: -1px;
+                    font-size: 25px; font-weight: 800; letter-spacing: -1px;
                 }
-
-                .logo span {
-                    color: #b48a55;
-                }
-
+                .logo span { color: #b48a55; }
                 .nav {
-                    display: flex;
-                    align-items: center;
-                    gap: 28px;
-                    font-size: 14px;
+                    display: flex; align-items: center;
+                    flex-wrap: wrap; gap: 24px; font-size: 14px;
                 }
-
-                .nav a:hover {
-                    color: #a67c48;
-                }
-
+                .nav a:hover { color: #a67c48; }
                 .button {
-                    display: inline-flex;
-                    align-items: center;
-                    justify-content: center;
-                    padding: 15px 23px;
-                    border: 0;
-                    border-radius: 7px;
-                    background: #244b3e;
-                    color: white;
-                    font-weight: 600;
+                    display: inline-flex; align-items: center;
+                    justify-content: center; padding: 15px 23px;
+                    border: 0; border-radius: 7px; background: #244b3e;
+                    color: white; font-weight: 600;
                 }
-
-                .button:hover {
-                    background: #17392d;
-                    color: white;
-                }
-
+                .button:hover { background: #17392d; color: white; }
                 .hero {
-                    display: grid;
-                    grid-template-columns: 1fr 1fr;
-                    align-items: center;
-                    gap: 55px;
-                    padding: 65px 0 100px;
+                    display: grid; grid-template-columns: 1fr 1fr;
+                    align-items: center; gap: 55px; padding: 65px 0 100px;
                 }
-
                 .eyebrow {
-                    color: #947044;
-                    text-transform: uppercase;
-                    letter-spacing: 3px;
-                    font-size: 11px;
-                    font-weight: 700;
+                    color: #947044; text-transform: uppercase;
+                    letter-spacing: 3px; font-size: 11px; font-weight: 700;
                 }
-
-                h1, h2, h3, p {
-                    margin-top: 0;
-                }
-
+                h1, h2, h3, p { margin-top: 0; }
                 h1 {
                     font-family: Georgia, serif;
                     font-size: clamp(42px, 5vw, 66px);
-                    font-weight: 400;
-                    line-height: 1.08;
-                    margin-bottom: 24px;
+                    font-weight: 400; line-height: 1.08; margin-bottom: 24px;
                 }
-
-                h1 em {
-                    color: #a27c4c;
-                    font-weight: 400;
-                }
-
+                h1 em { color: #a27c4c; font-weight: 400; }
                 .intro {
-                    color: #758078;
-                    line-height: 1.9;
-                    max-width: 440px;
+                    color: #758078; line-height: 1.9; max-width: 440px;
                 }
-
                 .hero-actions {
-                    display: flex;
-                    align-items: center;
-                    gap: 25px;
-                    margin-top: 30px;
+                    display: flex; align-items: center;
+                    gap: 25px; margin-top: 30px;
                 }
-
                 .text-link {
-                    font-size: 14px;
-                    border-bottom: 1px solid #aab5ad;
+                    font-size: 14px; border-bottom: 1px solid #aab5ad;
                     padding-bottom: 5px;
                 }
-
                 .hero-art {
-                    position: relative;
-                    height: 390px;
+                    position: relative; height: 390px;
                     border-radius: 100px 12px 12px 12px;
-                    overflow: hidden;
-                    background: #ded8cc;
+                    overflow: hidden; background: #ded8cc;
                 }
-
                 .hero-art img {
-                    height: 100%;
-                    width: 100%;
-                    object-fit: cover;
-                    display: block;
+                    height: 100%; width: 100%;
+                    object-fit: cover; display: block;
                 }
-
                 .art-label {
-                    position: absolute;
-                    bottom: 22px;
-                    left: 22px;
-                    right: 22px;
-                    width: fit-content;
-                    background: #fffffff0;
-                    padding: 16px 22px;
+                    position: absolute; bottom: 22px;
+                    left: 22px; right: 22px; width: fit-content;
+                    background: #fffffff0; padding: 16px 22px;
                     border-radius: 8px;
                 }
-
-                .art-label strong {
-                    display: block;
-                    margin-bottom: 6px;
-                }
-
-                .art-label small {
-                    color: #758078;
-                }
-
+                .art-label strong { display: block; margin-bottom: 6px; }
+                .art-label small { color: #758078; }
                 .search-panel {
-                    margin-top: -45px;
-                    position: relative;
-                    background: white;
-                    padding: 25px;
-                    border-radius: 12px;
-                    box-shadow: 0 15px 55px #203a330c;
+                    margin-top: -45px; position: relative;
+                    background: white; padding: 25px;
+                    border-radius: 12px; box-shadow: 0 15px 55px #203a330c;
                     border: 1px solid #eeece6;
                 }
-
-                .tabs {
-                    display: flex;
-                    gap: 8px;
-                    margin-bottom: 22px;
-                }
-
+                .tabs { display: flex; gap: 8px; margin-bottom: 22px; }
                 .tab {
-                    padding: 10px 24px;
-                    border: 0;
-                    background: #f4f4ef;
-                    color: #5b6b60;
-                    border-radius: 5px;
+                    padding: 10px 24px; border: 0; background: #f4f4ef;
+                    color: #5b6b60; border-radius: 5px;
                 }
-
-                .tab.active {
-                    background: #244b3e;
-                    color: white;
-                }
-
+                .tab.active { background: #244b3e; color: white; }
                 .search-grid {
-                    display: grid;
-                    grid-template-columns: 1fr 1fr 1fr auto;
-                    align-items: end;
-                    gap: 18px;
+                    display: grid; grid-template-columns: 1fr 1fr 1fr auto;
+                    align-items: end; gap: 18px;
                 }
-
                 label {
-                    display: block;
-                    font-size: 12px;
-                    font-weight: 700;
+                    display: block; font-size: 12px; font-weight: 700;
                 }
-
                 select, input {
-                    width: 100%;
-                    margin-top: 9px;
-                    padding: 13px;
-                    border: 1px solid #e2e6df;
-                    border-radius: 5px;
-                    color: #536259;
-                    background: white;
-                    min-width: 0;
+                    width: 100%; margin-top: 9px; padding: 13px;
+                    border: 1px solid #e2e6df; border-radius: 5px;
+                    color: #536259; background: white; min-width: 0;
                 }
-
-                .section {
-                    padding: 80px 0;
-                    scroll-margin-top: 25px;
-                }
-
+                .section { padding: 80px 0; scroll-margin-top: 25px; }
                 .section-heading {
-                    display: flex;
-                    justify-content: space-between;
-                    align-items: end;
-                    gap: 20px;
-                    margin-bottom: 30px;
+                    display: flex; justify-content: space-between;
+                    align-items: end; gap: 20px; margin-bottom: 30px;
                 }
-
                 h2 {
-                    font-family: Georgia, serif;
-                    font-size: 36px;
-                    font-weight: 400;
-                    margin-bottom: 12px;
+                    font-family: Georgia, serif; font-size: 36px;
+                    font-weight: 400; margin-bottom: 12px;
                 }
-
                 .muted {
-                    color: #7b857d;
-                    font-size: 14px;
-                    line-height: 1.8;
-                    margin-bottom: 0;
+                    color: #7b857d; font-size: 14px;
+                    line-height: 1.8; margin-bottom: 0;
                 }
-
                 .outline {
-                    padding: 12px 18px;
-                    border: 1px solid #d7ded5;
-                    border-radius: 6px;
-                    background: transparent;
-                    color: #244b3e;
+                    padding: 12px 18px; border: 1px solid #d7ded5;
+                    border-radius: 6px; background: transparent; color: #244b3e;
                 }
-
-                .outline:hover,
-                .outline.selected {
-                    background: #e6eee8;
-                    border-color: #244b3e;
+                .outline:hover, .outline.selected {
+                    background: #e6eee8; border-color: #244b3e;
                 }
-
-                .filter-actions {
-                    display: flex;
-                    flex-wrap: wrap;
-                    gap: 10px;
-                }
-
+                .filter-actions { display: flex; flex-wrap: wrap; gap: 10px; }
                 .cards {
-                    display: grid;
-                    grid-template-columns: repeat(3, 1fr);
+                    display: grid; grid-template-columns: repeat(3, 1fr);
                     gap: 25px;
                 }
-
                 .card {
-                    background: white;
-                    border: 1px solid #e8eae3;
-                    border-radius: 10px;
-                    overflow: hidden;
+                    background: white; border: 1px solid #e8eae3;
+                    border-radius: 10px; overflow: hidden;
                     transition: transform .2s, box-shadow .2s;
                 }
-
                 .card:hover {
                     transform: translateY(-4px);
                     box-shadow: 0 14px 30px #203a3310;
                 }
-
                 .card-image {
-                    position: relative;
-                    height: 215px;
-                    overflow: hidden;
-                    background: #e7e7df;
+                    position: relative; height: 215px;
+                    overflow: hidden; background: #e7e7df;
                 }
-
                 .card-image img {
-                    width: 100%;
-                    height: 100%;
-                    object-fit: cover;
-                    display: block;
-                    transition: transform .4s;
+                    width: 100%; height: 100%; object-fit: cover;
+                    display: block; transition: transform .4s;
                 }
-
-                .card:hover .card-image img {
-                    transform: scale(1.04);
-                }
-
+                .card:hover .card-image img { transform: scale(1.04); }
                 .badge {
-                    position: absolute;
-                    top: 15px;
-                    left: 15px;
-                    background: white;
-                    padding: 7px 11px;
-                    border-radius: 4px;
-                    font-size: 11px;
-                    font-weight: 700;
+                    position: absolute; top: 15px; left: 15px;
+                    background: white; padding: 7px 11px;
+                    border-radius: 4px; font-size: 11px; font-weight: 700;
                 }
-
                 .favorite {
-                    position: absolute;
-                    top: 13px;
-                    right: 13px;
-                    width: 36px;
-                    height: 36px;
-                    border: 0;
-                    border-radius: 50%;
-                    background: white;
-                    color: #244b3e;
-                    font-size: 24px;
+                    position: absolute; top: 13px; right: 13px;
+                    width: 36px; height: 36px; border: 0;
+                    border-radius: 50%; background: white;
+                    color: #244b3e; font-size: 24px;
                 }
-
-                .favorite.saved {
-                    color: #b65b58;
-                }
-
-                .card-body {
-                    padding: 22px;
-                }
-
+                .favorite.saved { color: #b65b58; }
+                .card-body { padding: 22px; }
                 .price {
-                    color: #244b3e;
-                    font-size: 21px;
-                    font-weight: 700;
-                    margin-bottom: 14px;
+                    color: #244b3e; font-size: 21px;
+                    font-weight: 700; margin-bottom: 14px;
                 }
-
                 .price small {
-                    font-weight: 400;
-                    font-size: 12px;
-                    color: #7b857d;
+                    font-weight: 400; font-size: 12px; color: #7b857d;
                 }
-
-                h3 {
-                    font-size: 17px;
-                    margin-bottom: 9px;
+                h3 { font-size: 17px; margin-bottom: 9px; }
+                .detail-link {
+                    display: inline-block; margin-bottom: 15px;
+                    font-size: 13px; font-weight: 600; color: #947044;
                 }
-
                 .location {
-                    font-size: 12px;
-                    color: #7b857d;
-                    margin-bottom: 20px;
+                    font-size: 12px; color: #7b857d; margin-bottom: 20px;
                 }
-
                 .features {
-                    border-top: 1px solid #eef0e9;
-                    padding-top: 15px;
-                    display: flex;
-                    flex-wrap: wrap;
-                    gap: 15px;
-                    font-size: 12px;
-                    color: #68766c;
+                    border-top: 1px solid #eef0e9; padding-top: 15px;
+                    display: flex; flex-wrap: wrap; gap: 15px;
+                    font-size: 12px; color: #68766c;
                 }
-
                 .demo-note {
-                    margin-top: 22px;
-                    font-size: 12px;
-                    color: #7b857d;
-                    line-height: 1.8;
+                    margin-top: 22px; font-size: 12px;
+                    color: #7b857d; line-height: 1.8;
                 }
-
                 .empty {
-                    padding: 45px 25px;
-                    text-align: center;
+                    padding: 35px 25px; text-align: center;
                     border: 1px dashed #cbd4c8;
-                    border-radius: 8px;
-                    line-height: 1.8;
+                    border-radius: 8px; line-height: 1.8;
                 }
-
                 .error {
-                    border-color: #dba9a3;
-                    color: #99483f;
-                    background: #fff5f2;
+                    border-color: #dba9a3; color: #99483f;
+                    background: #fff5f2; margin-bottom: 20px;
                 }
-
                 .about {
-                    display: grid;
-                    grid-template-columns: 1fr 1fr;
-                    gap: 65px;
-                    background: #edf0e8;
-                    border-radius: 12px;
-                    padding: 50px;
+                    display: grid; grid-template-columns: 1fr 1fr;
+                    gap: 65px; background: #edf0e8;
+                    border-radius: 12px; padding: 50px;
                 }
-
-                .about p {
-                    color: #68766c;
-                    line-height: 1.9;
-                }
-
+                .about p { color: #68766c; line-height: 1.9; }
                 .reasons {
-                    display: grid;
-                    gap: 22px;
-                    align-content: center;
+                    display: grid; gap: 22px; align-content: center;
                 }
-
-                .reason {
-                    display: flex;
-                    gap: 15px;
-                    align-items: start;
-                }
-
+                .reason { display: flex; gap: 15px; align-items: start; }
                 .number {
-                    color: #a27c4c;
-                    font-family: Georgia, serif;
-                    font-size: 26px;
+                    color: #a27c4c; font-family: Georgia, serif; font-size: 26px;
                 }
-
-                .reason strong {
-                    display: block;
-                    margin-bottom: 5px;
-                }
-
-                .reason p {
-                    margin: 0;
-                    font-size: 13px;
-                }
-
+                .reason strong { display: block; margin-bottom: 5px; }
+                .reason p { margin: 0; font-size: 13px; }
                 .contact {
-                    margin-top: 65px;
-                    margin-bottom: 60px;
-                    padding: 40px;
-                    border-radius: 12px;
-                    background: #244b3e;
-                    color: white;
-                    display: flex;
-                    align-items: center;
-                    justify-content: space-between;
-                    gap: 25px;
+                    margin: 65px 0 60px; padding: 40px;
+                    border-radius: 12px; background: #244b3e;
+                    color: white; display: flex; align-items: center;
+                    justify-content: space-between; gap: 25px;
                 }
-
-                .contact h2 {
-                    font-size: 30px;
-                }
-
+                .contact h2 { font-size: 30px; }
                 .contact p {
-                    color: #d0ddd3;
-                    margin-bottom: 0;
-                    line-height: 1.7;
+                    color: #d0ddd3; margin-bottom: 0; line-height: 1.7;
                 }
-
                 .contact-tag {
-                    padding: 14px 20px;
-                    border: 1px solid #6e8a78;
-                    border-radius: 6px;
-                    font-size: 13px;
-                    flex-shrink: 0;
+                    padding: 14px 20px; border: 1px solid #6e8a78;
+                    border-radius: 6px; font-size: 13px; flex-shrink: 0;
                 }
-
                 footer {
-                    padding: 30px 0;
-                    border-top: 1px solid #e4e7df;
-                    display: flex;
-                    justify-content: space-between;
-                    align-items: center;
-                    gap: 15px;
+                    padding: 30px 0; border-top: 1px solid #e4e7df;
+                    display: flex; justify-content: space-between;
+                    align-items: center; gap: 15px;
                 }
-
-                footer p {
-                    color: #7b857d;
-                    font-size: 12px;
-                    margin: 0;
-                }
-
+                footer p { color: #7b857d; font-size: 12px; margin: 0; }
                 @media (max-width: 900px) {
                     .nav { gap: 15px; }
                     .hero { gap: 25px; }
@@ -637,31 +513,24 @@ function App() {
                     .cards { grid-template-columns: repeat(2, 1fr); }
                     .about { gap: 30px; padding: 30px; }
                 }
-
                 @media (max-width: 600px) {
                     .container { padding: 0 20px; }
                     .header {
-                        flex-wrap: wrap;
-                        padding: 22px 0;
-                        gap: 18px;
+                        flex-wrap: wrap; padding: 22px 0; gap: 18px;
                     }
                     .nav {
-                        width: 100%;
-                        justify-content: space-between;
-                        font-size: 12px;
-                        gap: 10px;
+                        width: 100%; font-size: 12px;
+                        gap: 14px; justify-content: flex-start;
                     }
                     .nav .button { padding: 10px 12px; }
                     .hero {
                         grid-template-columns: 1fr;
-                        padding: 35px 0 75px;
-                        gap: 35px;
+                        padding: 35px 0 75px; gap: 35px;
                     }
                     h1 { font-size: 45px; }
                     .hero-actions { gap: 18px; }
                     .hero-art {
-                        height: 280px;
-                        border-top-left-radius: 65px;
+                        height: 280px; border-top-left-radius: 65px;
                     }
                     .search-panel { padding: 20px; }
                     .search-grid, .cards, .about {
@@ -669,23 +538,16 @@ function App() {
                     }
                     .section { padding: 55px 0; }
                     .section-heading {
-                        align-items: start;
-                        flex-direction: column;
+                        align-items: start; flex-direction: column;
                     }
                     h2 { font-size: 30px; }
                     .card-image { height: 230px; }
                     .about { padding: 25px; }
                     .contact {
-                        padding: 28px;
-                        flex-direction: column;
-                        align-items: start;
+                        padding: 28px; flex-direction: column; align-items: start;
                     }
-                    footer {
-                        align-items: start;
-                        flex-direction: column;
-                    }
+                    footer { align-items: start; flex-direction: column; }
                 }
-
                 @media (prefers-reduced-motion: reduce) {
                     html { scroll-behavior: auto; }
                     .card, .card-image img { transition: none; }
@@ -702,6 +564,9 @@ function App() {
                         <a href="#accueil">Accueil</a>
                         <a href="#biens">Nos biens</a>
                         <a href="#agence">L’agence</a>
+                        <a href="/mon-compte">
+                            {authenticated ? 'Mon compte' : 'Connexion'}
+                        </a>
                         <a href="#contact" className="button">
                             Contact
                         </a>
@@ -731,7 +596,6 @@ function App() {
                                 <a href="#biens" className="button">
                                     Découvrir nos biens ↗
                                 </a>
-
                                 <a href="#agence" className="text-link">
                                     Notre agence
                                 </a>
@@ -870,16 +734,23 @@ function App() {
                                         favoritesOnly ? 'selected' : ''
                                     }`}
                                     aria-pressed={favoritesOnly}
-                                    onClick={() =>
-                                        setFavoritesOnly(!favoritesOnly)
-                                    }
+                                    disabled={favoritesDisabled}
+                                    onClick={showFavorites}
                                 >
-                                    {favoritesOnly
-                                        ? 'Voir les résultats'
-                                        : `♡ Mes favoris (${favorites.length})`}
+                                    {accountLoading
+                                        ? 'Chargement des favoris…'
+                                        : favoritesOnly
+                                          ? 'Voir les résultats'
+                                          : `♡ Mes favoris (${availableFavoritesCount})`}
                                 </button>
                             </div>
                         </div>
+
+                        {(accountError || favoriteError) && (
+                            <div className="empty error" role="alert">
+                                {accountError || favoriteError}
+                            </div>
+                        )}
 
                         {loading ? (
                             <div className="empty" role="status">
@@ -928,6 +799,7 @@ function App() {
                                                             ? 'saved'
                                                             : ''
                                                     }`}
+                                                    disabled={favoritesDisabled}
                                                     onClick={() =>
                                                         toggleFavorite(
                                                             property.id
@@ -955,23 +827,16 @@ function App() {
                                                     )}
                                                 </p>
 
-                                                
-            <h3>{property.title}</h3>
+                                                <h3>{property.title}</h3>
 
-            <a
-                data-property-detail-link
-                href={'/biens/' + property.id}
-                style={{
-                    display: 'inline-block',
-                    marginBottom: '15px',
-                    fontSize: '13px',
-                    fontWeight: 600,
-                    color: '#947044',
-                }}
-            >
-                Voir le bien ↗
-            </a>
-        
+                                                <a
+                                                    className="detail-link"
+                                                    href={
+                                                        '/biens/' + property.id
+                                                    }
+                                                >
+                                                    Voir le bien ↗
+                                                </a>
 
                                                 <p className="location">
                                                     {property.city}
@@ -1004,7 +869,7 @@ function App() {
                             <div className="empty">
                                 <p>
                                     {favoritesOnly
-                                        ? 'Aucun favori ne correspond à cette sélection.'
+                                        ? 'Aucun favori disponible ne correspond à cette sélection.'
                                         : 'Aucun bien ne correspond à votre recherche.'}
                                 </p>
 
@@ -1020,8 +885,14 @@ function App() {
 
                         <p className="demo-note">
                             Projet de démonstration : annonces fictives et
-                            photos d’illustration. Les favoris sont conservés
-                            uniquement pendant cette visite.
+                            photos d’illustration.{' '}
+                            {accountLoading
+                                ? 'Chargement de votre compte…'
+                                : accountError
+                                  ? 'Vos favoris sont temporairement indisponibles.'
+                                  : authenticated
+                                    ? 'Vos favoris sont enregistrés dans votre compte.'
+                                    : 'Connectez-vous pour enregistrer vos favoris.'}
                         </p>
                     </section>
 
@@ -1073,9 +944,7 @@ function App() {
                             <div className="reason">
                                 <span className="number">03</span>
                                 <div>
-                                    <strong>
-                                        Un accompagnement personnel
-                                    </strong>
+                                    <strong>Un accompagnement personnel</strong>
                                     <p>
                                         Un espace pensé pour faciliter
                                         vos prochaines démarches.
@@ -1087,18 +956,16 @@ function App() {
 
                     <section className="contact" id="contact">
                         <div>
-                            <h2>
-                                Une nouvelle adresse commence ici.
-                            </h2>
+                            <h2>Une nouvelle adresse commence ici.</h2>
                             <p>
-                                L’espace de contact sera disponible
-                                prochainement pour organiser vos visites.
+                                Un bien vous intéresse ? Ouvrez sa fiche,
+                                puis cliquez sur « Demander une visite ».
                             </p>
                         </div>
 
-                        <span className="contact-tag">
-                            Projet en développement
-                        </span>
+                        <a className="contact-tag" href="#biens">
+                            Explorer les biens ↗
+                        </a>
                     </section>
                 </main>
 
